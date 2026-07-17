@@ -43,6 +43,15 @@ from app.rag.vector_store import get_vector_store
 logger = logging.getLogger(__name__)
 
 
+class EmptyKnowledgeBaseError(RuntimeError):
+    """Raised when ChromaDB has no indexed documents to retrieve from.
+
+    Distinct from a generic RuntimeError so callers (e.g. the API layer) can
+    catch this specifically and return a 503 with an actionable message,
+    instead of lumping "nothing ingested yet" in with unrelated 500s.
+    """
+
+
 # ---------------------------------------------------------------------------
 # PRIVATE HELPER
 # ---------------------------------------------------------------------------
@@ -96,6 +105,10 @@ def get_hybrid_retriever() -> EnsembleRetriever:
     # A rare term that appears several times in one chunk = very high score.
     # Common words like "the" or "is" have near-zero IDF and are ignored.
     all_docs = _load_all_documents()
+    if not all_docs:
+        raise EmptyKnowledgeBaseError(
+            "ChromaDB contains no indexed documents. Run the ingestion pipeline before querying."
+        )
     bm25_retriever = BM25Retriever.from_documents(all_docs)
 
     # Cast a wide net here — retrieval_candidates (20) gives the reranker

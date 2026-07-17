@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.rag.chain import get_rag_chain
+from app.rag.retriever import EmptyKnowledgeBaseError
 
 router = APIRouter()
 
@@ -51,10 +52,17 @@ async def chat(request: ChatRequest):
     # parse — and returns a plain string answer.
     #
     # We wrap this in try/except so that if Ollama is down or ChromaDB has an
-    # issue, the API returns a clean 500 JSON error instead of a raw Python
+    # issue, the API returns a clean JSON error instead of a raw Python
     # traceback, which would expose internals to the caller.
+    #
+    # EmptyKnowledgeBaseError is caught separately: it means the system is
+    # working correctly but nothing has been ingested yet, which is a 503
+    # (temporarily unavailable, retry after ingestion) — not a 500 (something
+    # actually broke).
     try:
         answer = get_rag_chain().invoke({"question": request.question})
+    except EmptyKnowledgeBaseError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Chain error: {exc}") from exc
 
