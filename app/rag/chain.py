@@ -1,10 +1,11 @@
+from operator import itemgetter
+
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 from app.core.config import settings
-from app.rag.vector_store import get_vector_store, get_retriever
+from app.rag.retriever import get_advanced_retriever
 
 # ---------------------------------------------------------------------------
 # PROMPT TEMPLATE
@@ -56,19 +57,19 @@ def _format_docs(docs):
 def get_rag_chain():
     """Return a runnable RAG chain ready to call with {"question": "..."}."""
 
-    # Build the retriever fresh each call so the chain always uses the current
-    # state of ChromaDB (important after a new document is ingested at runtime).
-    retriever = get_retriever(get_vector_store())
+    # Phase 2 advanced retriever: hybrid search → multi-query → rerank.
+    # Built fresh each call so it always reflects the current ChromaDB state.
+    retriever = get_advanced_retriever()
 
     # --- LCEL pipe syntax explained ---
     # The | operator chains runnables left to right, like a Unix pipeline.
     # Each stage receives the output of the stage before it.
     #
     # Stage 1 — input router:
-    #   RunnablePassthrough() keeps the original {"question": ...} dict intact
-    #   so the prompt stage can still read it.
-    #   The retriever runs in parallel, receives the raw question string, and
-    #   its output is assigned to the "context" key.
+    #   Every branch of this dict receives the SAME raw input: {"question": "..."}.
+    #   itemgetter("question") pulls just the string out for the branches that
+    #   need a plain string (the retriever); RunnablePassthrough() keeps the
+    #   whole dict for the branch that needs it (the prompt).
     #
     #   Result after stage 1: {"context": [Document, ...], "question": "..."}
     #
@@ -87,11 +88,12 @@ def get_rag_chain():
 
     chain = (
         {
-            # Run the retriever on the raw question string, then format the
-            # returned documents into a single context string.
-            "context": retriever | _format_docs,
-            # Pass the question through unchanged so the prompt can use it.
-            "question": RunnablePassthrough(),
+            # Pull the question string out of the input dict, run the
+            # retriever on it, then format the returned documents into a
+            # single context string.
+            "context": itemgetter("question") | retriever | _format_docs,
+            # Pass the question string through unchanged so the prompt can use it.
+            "question": itemgetter("question"),
         }
         | _PROMPT
         | ChatOllama(

@@ -30,9 +30,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
 
     # LangSmith observability
-    langchain_tracing_v2: bool = False
-    langchain_api_key: str = ""
-    langchain_project: str = "hotel-rag"
+    langsmith_tracing: bool = False
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_api_key: str = ""
+    langsmith_project: str = "RAG Building"
 
     # API security
     api_key: str = "dev-key"

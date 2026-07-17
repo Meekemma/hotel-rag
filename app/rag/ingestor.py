@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import fitz  # PyMuPDF
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_core.documents import Document
 
