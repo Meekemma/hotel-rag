@@ -1,8 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.rag.chain import get_rag_chain
+from app.rag.chain import to_messages, get_rag_chain
 from app.rag.retriever import EmptyKnowledgeBaseError
+from app.guardrails.exceptions import GuardrailViolation
+from app.guardrails.input_guard import check_input
+from app.guardrails.output_guard import check_output
+from app.memory.session_store import append_turn, create_session, get_history
 
 router = APIRouter()
 
@@ -18,10 +22,17 @@ router = APIRouter()
 # handles that for free in exchange for defining the model once.
 class ChatRequest(BaseModel):
     question: str
+    # None on a guest's first message — the server creates a new session and
+    # returns its id. The client must echo that id back on every following
+    # call in this same conversation so history can be looked up in Redis.
+    session_id: str | None = None
 
 
 class ChatResponse(BaseModel):
     answer: str
+    # Always returned, even on the first call, so the client has something
+    # to echo back next time.
+    session_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +53,24 @@ async def health():
 async def chat(request: ChatRequest):
     """Receive a guest question and return an answer grounded in hotel documents."""
 
-    # Reject blank questions immediately — the chain would still run but the
-    # retriever would return low-quality results for an empty query string.
-    if not request.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    # Input guardrail: rejects empty/too-long questions and obvious prompt-
+    # injection attempts before they ever reach the chain. See
+    # app/guardrails/input_guard.py for what's checked and why.
+    try:
+        check_input(request.question)
+    except GuardrailViolation as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+
+    # Session lifecycle: a fresh guest (no session_id sent) gets a brand new
+    # session created in Redis. A returning guest's session_id is used as-is
+    # to look up whatever history already exists for their conversation.
+    session_id = request.session_id or create_session()
+
+    # Pull this session's prior turns (oldest first, already capped to the
+    # last WINDOW_SIZE by session_store.append_turn) and convert them from
+    # Redis's plain-dict storage format into the BaseMessage objects the
+    # chain's MessagesPlaceholder("history") expects.
+    history = to_messages(get_history(session_id))
 
     # get_rag_chain() builds a fresh chain each call (retriever + LLM wired
     # together). invoke() runs the full pipeline — retrieve → prompt → LLM →
@@ -60,10 +85,22 @@ async def chat(request: ChatRequest):
     # (temporarily unavailable, retry after ingestion) — not a 500 (something
     # actually broke).
     try:
-        answer = get_rag_chain().invoke({"question": request.question})
+        answer = get_rag_chain().invoke(
+            {"question": request.question, "history": history}
+        )
     except EmptyKnowledgeBaseError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Chain error: {exc}") from exc
 
-    return ChatResponse(answer=answer)
+    # Output guardrail: catches leaked system-prompt text or an empty reply
+    # and swaps in a safe fallback. Never raises — a bad output isn't the
+    # guest's fault, so the request still succeeds with a 200.
+    answer = check_output(answer)
+
+    # Record this exchange so it's part of "history" on the guest's next
+    # call. Done after the guardrail substitution so a fallback message
+    # never gets remembered as if the LLM actually said it.
+    append_turn(session_id, request.question, answer)
+
+    return ChatResponse(answer=answer, session_id=session_id)
