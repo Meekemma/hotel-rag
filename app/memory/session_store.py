@@ -139,3 +139,25 @@ def append_turn(session_id: str, question: str, answer: str) -> None:
         settings.session_ttl_seconds,
         json.dumps(history),
     )
+
+
+# ---------------------------------------------------------------------------
+# DELETE SESSION
+# ---------------------------------------------------------------------------
+def delete_session(session_id: str) -> bool:
+    """Delete a session's history from Redis.
+
+    Returns True if a session actually existed and was removed, False if
+    there was nothing at that key (never created, or its TTL already expired
+    it naturally). We return a bool instead of raising on "nothing there"
+    because — same as get_history() above — this module treats "unknown
+    session" as a normal, expected state, not an error. The caller (routes.py)
+    decides what HTTP status that maps to; this layer just reports the fact.
+
+    _client.delete() returns an int: the number of keys it actually removed
+    (0 or 1 here, since we're only ever passing one key). bool(0) is False,
+    bool(1) is True, so wrapping the return value in bool() gives us exactly
+    the True/False we want.
+    """
+    deleted_count = _client.delete(_key(session_id))
+    return bool(deleted_count)
